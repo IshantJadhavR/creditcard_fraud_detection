@@ -1,0 +1,26 @@
+cat > .gitignore << 'EOF'
+# Virtual envs
+venv/
+.venv/
+env/
+ENV/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Data / large files
+creditcard.csv
+data/
+*.csv
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+.env
+EOF
