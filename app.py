@@ -1,23 +1,21 @@
 import streamlit as st
 import pandas as pd
-import pickle
+from xgboost import Booster, DMatrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     confusion_matrix, f1_score, precision_recall_curve,
-    auc, roc_curve, roc_auc_score, classification_report
+    auc, roc_curve, roc_auc_score
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 
 st.set_page_config(page_title="Credit Card Fraud Detection", page_icon="💳")
-
 st.title("💳 Credit Card Fraud Detection App")
 
 # --- Load trained model ---
-with open("fraud_model_best.pkl", "rb") as f:
-
-    model = pickle.load(f)
+model = Booster()
+model.load_model("fraud_model_best.json")
 
 # --- Fit scalers on original full dataset (Time & Amount) ---
 data = pd.read_csv("creditcard.csv")
@@ -33,27 +31,23 @@ uploaded_file = st.file_uploader("Upload a CSV file containing transactions", ty
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
-    df_for_metrics = df.copy()  # Keep original for metrics
+    df_for_metrics = df.copy()
 
-    # drop Class column if present (for prediction only)
     if 'Class' in df.columns:
         df = df.drop(columns=['Class'])
 
-    # scale Time & Amount
     df['scaled_time'] = scaler_time.transform(df_for_metrics[['Time']])
     df['scaled_amount'] = scaler_amount.transform(df_for_metrics[['Amount']])
-
     df = df.drop(columns=['Time', 'Amount'])
 
-    # reorder columns to match training
-    expected_order = [f"V{i}" for i in range(1, 29)] + ['scaled_time', 'scaled_amount']
-    df = df.reindex(columns=expected_order)
+    df = df.reindex(columns=cols_order)
 
     st.subheader("Preview of prepared data")
     st.dataframe(df.head())
 
-    preds = model.predict(df)
-    probs = model.predict_proba(df)[:, 1]
+    dmatrix = DMatrix(df)
+    probs = model.predict(dmatrix)
+    preds = (probs > 0.5).astype(int)
 
     out = pd.DataFrame({
         "Prediction": preds,
@@ -68,29 +62,24 @@ if uploaded_file is not None:
     if 'Class' in df_for_metrics.columns:
         true_labels = df_for_metrics['Class']
 
-        # Metrics at default threshold 0.5
-        f1_fraud = f1_score(true_labels, preds, pos_label=1)
+        
         f1_legit = f1_score(true_labels, preds, pos_label=0)
         precision, recall, _ = precision_recall_curve(true_labels, probs)
         pr_auc = auc(recall, precision)
         fpr, tpr, _ = roc_curve(true_labels, probs)
         roc_auc = roc_auc_score(true_labels, probs)
 
-        
-        st.metric("F1 Score ", f"{f1_legit:.4f}")
+        st.metric("F1 Score", f"{f1_legit:.4f}")
         st.metric("PR-AUC", f"{pr_auc:.4f}")
         st.metric("ROC-AUC", f"{roc_auc:.4f}")
 
-        # Confusion Matrix
-        cm = confusion_matrix(true_labels, preds)
         fig_cm, ax_cm = plt.subplots()
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax_cm)
+        sns.heatmap(confusion_matrix(true_labels, preds), annot=True, fmt='d', cmap='Blues', ax=ax_cm)
         ax_cm.set_xlabel('Predicted')
         ax_cm.set_ylabel('Actual')
         ax_cm.set_title('Confusion Matrix')
         st.pyplot(fig_cm)
 
-        # Precision-Recall Curve
         fig_pr, ax_pr = plt.subplots()
         ax_pr.plot(recall, precision, marker='.')
         ax_pr.set_xlabel('Recall')
@@ -98,7 +87,6 @@ if uploaded_file is not None:
         ax_pr.set_title(f'Precision-Recall Curve (PR-AUC = {pr_auc:.4f})')
         st.pyplot(fig_pr)
 
-        # ROC Curve
         fig_roc, ax_roc = plt.subplots()
         ax_roc.plot(fpr, tpr, label=f'ROC-AUC = {roc_auc:.4f}')
         ax_roc.plot([0,1], [0,1], linestyle='--', color='gray')
@@ -113,8 +101,9 @@ if uploaded_file is not None:
     row_idx = st.number_input("Select row index (0-based)", min_value=0, max_value=len(df)-1, value=0)
     if st.button("Predict Selected Row"):
         selected_row = df.iloc[[row_idx]]
-        pred_row = model.predict(selected_row)[0]
-        prob_row = model.predict_proba(selected_row)[0, 1]
+        dmatrix_row = DMatrix(selected_row)
+        prob_row = model.predict(dmatrix_row)[0]
+        pred_row = int(prob_row > 0.5)
         st.success(f"Selected Row Prediction: {'Fraud' if pred_row==1 else 'Legit'} "
                    f"(Fraud probability: {prob_row:.2%})")
 
@@ -132,12 +121,13 @@ if st.button("Predict Single Transaction (Manual)"):
     single_df = pd.DataFrame([input_dict])
     single_df['scaled_time'] = scaler_time.transform([[time_val]])
     single_df['scaled_amount'] = scaler_amount.transform([[amount_val]])
-
     single_df = single_df[cols_order]
 
-    pred = model.predict(single_df)[0]
-    prob = model.predict_proba(single_df)[0, 1]
+    dmatrix_single = DMatrix(single_df)
+    prob = model.predict(dmatrix_single)[0]
+    pred = int(prob > 0.5)
 
     st.success(f"Prediction: {'Fraud' if pred==1 else 'Legit'} (Fraud probability: {prob:.2%})")
 
-st.caption("Model: XGBoost, trained with scaled Time & Amount. Metrics above show F1 for both classes.")
+st.caption("Model: XGBoost Booster, trained with scaled Time & Amount. Metrics above show F1 for both classes.")
+
