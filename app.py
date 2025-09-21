@@ -15,10 +15,10 @@ st.title("💳 Credit Card Fraud Detection App")
 
 # --- Load trained model ---
 model = Booster()
-model.load_model("fraud_model_best.json")
+model.load_model("./fraud_model_best.json")
 
 # --- Fit scalers on original full dataset (Time & Amount) ---
-data = pd.read_csv("creditcard.csv")
+data = pd.read_csv("./creditcard.csv")
 scaler_time = StandardScaler().fit(data[['Time']])
 scaler_amount = StandardScaler().fit(data[['Amount']])
 
