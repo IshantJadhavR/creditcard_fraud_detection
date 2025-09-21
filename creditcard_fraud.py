@@ -105,8 +105,8 @@ print(f"ROC-AUC:            {roc_auc:.4f}\n")
 print("Classification Report:\n", classification_report(y_test, y_pred, digits=4))
 
 # ===== Save model =====
-joblib.dump(model, "fraud_model_best.pkl")
-print("✅ Saved best model to fraud_model_best.pkl")
+model.save_model("fraud_model_best.json")
+print("✅ Saved best model to fraud_model_best.json")
 
 # ===== Optional plots =====
 cm = confusion_matrix(y_test, y_pred)
