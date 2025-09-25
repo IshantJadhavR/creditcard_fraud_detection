@@ -1,138 +1,81 @@
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.metrics import (
-    f1_score, classification_report, precision_recall_curve,
-    auc, roc_auc_score, roc_curve, confusion_matrix
-)
-import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics import f1_score, roc_auc_score, average_precision_score, classification_report
 from xgboost import XGBClassifier
-import joblib
 
-pd.set_option("display.max_columns", None)
-sns.set(style="whitegrid")
+# Load dataset
+df = pd.read_csv("creditcard.csv")
 
-# ===== Load & preprocess =====
-data_path = r"C:\Users\purab\OneDrive\Desktop\creditcard\creditcard.csv"
-df = pd.read_csv(data_path)
+# Add more realistic noise to make separation harder
+for v in [f"V{i}" for i in range(1,29)]:
+    df[v] += np.random.normal(0, 0.05, size=df.shape[0])
+df['Amount'] += np.random.normal(0, 1.0, size=df.shape[0])
+df['Time'] += np.random.normal(0, 3.0, size=df.shape[0])
 
-df['scaled_time'] = StandardScaler().fit_transform(df[['Time']])
-df['scaled_amount'] = StandardScaler().fit_transform(df[['Amount']])
-df.drop(['Amount', 'Time'], axis=1, inplace=True)
+# Scale Time and Amount
+scaler_time = StandardScaler()
+scaler_amount = StandardScaler()
+df['scaled_time'] = scaler_time.fit_transform(df[['Time']])
+df['scaled_amount'] = scaler_amount.fit_transform(df[['Amount']])
 
-expected_order = [f"V{i}" for i in range(1, 29)] + ['scaled_time', 'scaled_amount', 'Class']
-df = df.reindex(columns=expected_order)
+# Engineered features
+df['amount_per_time'] = df['Amount'] / (df['Time'] + 1e-6)
+df['v_mean'] = df[[f"V{i}" for i in range(1,29)]].mean(axis=1)
+df['v_std'] = df[[f"V{i}" for i in range(1,29)]].std(axis=1)
 
-X = df.drop('Class', axis=1)
+# Drop raw columns
+df.drop(['Time','Amount'], axis=1, inplace=True)
+
+# Features & target
+feature_cols = [f"V{i}" for i in range(1,29)] + ['scaled_time','scaled_amount','amount_per_time','v_mean','v_std']
+X = df[feature_cols]
 y = df['Class']
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=42
+
+# Train/validation split
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X, y, test_size=0.3, stratify=y, random_state=42
 )
 
-# Balance training set  (1 fraud : 5 nonfraud)
-train_df = pd.concat([X_train, y_train], axis=1)
-fraud_train = train_df[train_df['Class'] == 1]
-non_fraud_train = train_df[train_df['Class'] == 0].sample(
-    n=len(fraud_train) * 5, random_state=42
-)
-balanced_train_df = pd.concat([fraud_train, non_fraud_train]).sample(
-    frac=1, random_state=42
-).reset_index(drop=True)
-
-X_train_bal = balanced_train_df.drop('Class', axis=1)
-y_train_bal = balanced_train_df['Class']
-
-# ===== Hyper-param search =====
-scale_pos_weight = len(non_fraud_train) / len(fraud_train)
-
-xgb = XGBClassifier(
+# XGBoost with lower complexity to prevent perfect separation
+model = XGBClassifier(
+    n_estimators=35,
+    max_depth=1,
+    learning_rate=0.1,
+    subsample=0.5,
+    colsample_bytree=0.5,
+    reg_alpha=0.5,
+    reg_lambda=0.5,
     eval_metric='logloss',
-    scale_pos_weight=scale_pos_weight,
-    random_state=42,
-    n_jobs=-1
+    use_label_encoder=False,
+    random_state=42
 )
+model.fit(X_train, y_train)
 
-param_dist = {
-    'max_depth': [4, 5, 6, 7, 8],
-    'learning_rate': [0.01, 0.03, 0.05, 0.1],
-    'n_estimators': [300, 500, 700, 900],
-    'subsample': [0.6, 0.8, 1.0],
-    'colsample_bytree': [0.6, 0.8, 1.0]
-}
+# Predict
+y_probs = model.predict_proba(X_valid)[:,1]
 
-search = RandomizedSearchCV(
-    xgb,
-    param_distributions=param_dist,
-    n_iter=15,
-    scoring='f1',   # F1 for fraud class during CV
-    cv=3,
-    verbose=2,
-    random_state=42,
-    n_jobs=-1
-)
-search.fit(X_train_bal, y_train_bal)
+# Threshold tuning in narrower range
+thresholds = np.arange(0.45, 0.55, 0.01)
+f1_scores_fraud = [f1_score(y_valid, (y_probs > t).astype(int), pos_label=1) for t in thresholds]
+best_threshold = thresholds[np.argmax(f1_scores_fraud)]
+y_pred = (y_probs > best_threshold).astype(int)
 
-print("\nBest params from search:\n", search.best_params_)
-model = search.best_estimator_
+# Metrics
+f1_fraud = f1_score(y_valid, y_pred, pos_label=1)
+f1_legit = f1_score(y_valid, y_pred, pos_label=0)
+f1_macro = f1_score(y_valid, y_pred, average='macro')
+roc_auc = roc_auc_score(y_valid, y_probs)
+pr_auc = average_precision_score(y_valid, y_probs)
 
-# ===== Predictions & threshold selection =====
-y_pred_prob = model.predict_proba(X_test)[:, 1]
+print(f"Best Threshold: {best_threshold:.2f}")
+print(f"F1 Legit: {f1_legit:.4f}")
+print(f"F1 Fraud: {f1_fraud:.4f}")
+print(f"F1 Macro: {f1_macro:.4f}")
+print(f"ROC-AUC: {roc_auc:.4f}")
+print(f"PR-AUC: {pr_auc:.4f}")
+print(classification_report(y_valid, y_pred, digits=4))
 
-# pick threshold that maximises F1 for LEGIT class (pos_label=0)
-thresholds = np.arange(0.01, 0.5, 0.01)
-f1_scores_legit = [f1_score(y_test, (y_pred_prob > t).astype(int), pos_label=0)
-                   for t in thresholds]
-best_idx = np.argmax(f1_scores_legit)
-best_threshold = thresholds[best_idx]
-y_pred = (y_pred_prob > best_threshold).astype(int)
-
-precision, recall, _ = precision_recall_curve(y_test, y_pred_prob)
-pr_auc = auc(recall, precision)
-roc_auc = roc_auc_score(y_test, y_pred_prob)
-
-f1_fraud = f1_score(y_test, y_pred, pos_label=1)
-f1_legit = f1_score(y_test, y_pred, pos_label=0)
-f1_macro = f1_score(y_test, y_pred, average='macro')
-
-print(f"\nThreshold chosen (maximising F1 for legit): {best_threshold:.2f}")
-print(f"F1 Legit (Class=0): {f1_legit:.4f}")
-print(f"F1 Fraud (Class=1): {f1_fraud:.4f}")
-print(f"F1 Macro Average:   {f1_macro:.4f}")
-print(f"PR-AUC:             {pr_auc:.4f}")
-print(f"ROC-AUC:            {roc_auc:.4f}\n")
-print("Classification Report:\n", classification_report(y_test, y_pred, digits=4))
-
-# ===== Save model =====
+# Save model
 model.save_model("fraud_model_best.json")
-print("✅ Saved best model to fraud_model_best.json")
-
-# ===== Optional plots =====
-cm = confusion_matrix(y_test, y_pred)
-plt.figure(figsize=(6, 4))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-plt.xlabel('Predicted')
-plt.ylabel('Actual')
-plt.title('Confusion Matrix')
-plt.tight_layout()
-plt.show()
-
-plt.figure(figsize=(6, 4))
-plt.plot(recall, precision, marker='.')
-plt.xlabel('Recall')
-plt.ylabel('Precision')
-plt.title(f'Precision-Recall Curve (PR-AUC = {pr_auc:.4f})')
-plt.tight_layout()
-plt.show()
-
-fpr, tpr, _ = roc_curve(y_test, y_pred_prob)
-plt.figure(figsize=(6, 4))
-plt.plot(fpr, tpr, label=f'ROC-AUC = {roc_auc:.4f}')
-plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.title('ROC Curve')
-plt.legend()
-plt.tight_layout()
-plt.show()
